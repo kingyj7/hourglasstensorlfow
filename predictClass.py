@@ -43,6 +43,7 @@ from yolo_net import YOLONet
 from datagen import DataGenerator
 import config as cfg
 import threading
+import os
 
 class PredictProcessor():
 	"""
@@ -65,12 +66,97 @@ class PredictProcessor():
 						batch_size = self.params['batch_size'], drop_rate = self.params['dropout_rate'], lear_rate = self.params['learning_rate'],
 						decay = self.params['learning_rate_decay'], decay_step = self.params['decay_step'], dataset = None, training = False,
 						w_summary = True, logdir_test = self.params['log_dir_test'],
-						logdir_train = self.params['log_dir_test'], tiny = self.params['tiny'], 
+						logdir_train = self.params['log_dir_test'],saver_dir = self.params['saver_directory'], tiny = self.params['tiny'], 
 						modif = False, name = self.params['name'], attention = self.params['mcam'], w_loss=self.params['weighted_loss'] , joints= self.params['joint_list'])
 		self.graph = tf.Graph()
-		self.src = 0
+		#self.src = '/home/yangjing/data/ATM/video_ex/2018-08-20_15.mp4'
+		self.src='./video/drive.mp4'
 		self.cam_res = (480,640)
-		
+		#self.img_src='imgs_test'
+		#self.wpath='fuji_kp/half20_new'
+		self.txt_src='fuji_ex/fuji_det_21_13.txt'
+		self.img_dir='/home/yangjing/data/FujiATM/imgs_ex/2018-08-21_13.mp4'
+
+		self.det_dir='./fuji_det/'		
+		self.vimg_dir='/home/yangjing/data/ATM/imgs_ex/'
+		self.kp_dir='./fuji_kp'
+		self.video_type='mp4'
+	
+	def dets_input(self,datagen,boxp=0.2,thresh = 0.05, plt_j = True, plt_l = True, plt_hm = False, debug = True):
+		det_txts=os.listdir(self.det_dir)
+		det_txts.sort()
+		sub='bcdefghijklmnopq'
+		for det_txt in det_txts[:1]:
+			file_name=det_txt[4:-4]         #det_,.txt
+			kp_path=os.path.join(self.kp_dir,file_name)
+			kp_params=os.path.join(kp_path,file_name+'_thr'+str(thresh)+'boxS_boxp0.2_floss')
+
+			if not os.path.exists(kp_path):
+				os.mkdir(kp_path)
+				print('mkdir: '+kp_path)
+			if not os.path.exists(kp_params):
+				os.mkdir(kp_params)
+				print('mkdir: '+kp_params)
+
+			names=[]
+			k=0
+			fid=open(os.path.join(self.det_dir,det_txt),'r')
+			for img_name in fid.readlines():
+				sample=img_name.strip().split(' ')
+				name=sample[0]
+				if name not in names:
+					names.append(name)
+					k=0
+					w_name=name[:-4]+'a'+'.jpg'
+				else:
+					w_name=name[:-4]+sub[k]+'.jpg'
+					k+=1
+				box=list(map(int,sample[1:]))
+				img_src=os.path.join(self.vimg_dir,det_txt[4:-3]+self.video_type+'/'+name)
+				img=cv2.imread(img_src)
+				if img is None:
+					print(img_src)
+				img=cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+
+				padd,cbox=datagen._crop_data(img.shape[0],img.shape[1],box,joints=None,boxp=boxp)
+				boxS=min(cbox[2],cbox[3])
+				boxL=max(cbox[2],cbox[3])
+				wh='w' if boxS==cbox[2] else 'h'
+
+				img=datagen._crop_img(img,padd,cbox)   
+				img_hg = cv2.resize(img, (256,256))
+				img_res = cv2.resize(img, (800,800))
+				img_hg = cv2.cvtColor(img_hg, cv2.COLOR_BGR2RGB)
+
+				hg = self.HG.Session.run(self.HG.pred_sigmoid, feed_dict = {self.HG.img: np.expand_dims(img_hg/255, axis = 0)})
+				j = np.ones(shape = (self.params['num_joints'],2)) * -1
+				if plt_hm:
+					hm = np.sum(hg[0], axis = 2)
+					hm = np.repeat(np.expand_dims(hm, axis = 2), 3, axis = 2)
+					hm = cv2.resize(hm, (800,800))
+					img_res = img_res / 255 + hm
+				for i in range(len(j)):
+					idx = np.unravel_index( hg[0,:,:,i].argmax(), (64,64))
+					boxs_id= 1 if wh=='w' else 0 ##pred_result is reversed
+					trans_boxS=64/boxL*boxS
+					if hg[0, idx[0], idx[1], i] > thresh and 32-trans_boxS//2<idx[boxs_id]<32+trans_boxS//2:
+						j[i] = np.asarray(idx) * 800 / 64
+						if plt_j:
+							cv2.circle(img_res, center = tuple(j[i].astype(np.int))[::-1], radius= 5, color= self.color[i][::-1], thickness= -1)
+				if plt_l:
+					for i in range(len(self.links)):
+						l = self.links[i]['link']
+						good_link = True
+						for p in l:
+							if np.array_equal(j[p], [-1,-1]):
+								good_link = False
+						if good_link:
+							pos = self.givePixel(l, j)
+							cv2.line(img_res, tuple(pos[0])[::-1], tuple(pos[1])[::-1], self.links[i]['color'][::-1], thickness = 5)
+
+				img_res = cv2.cvtColor(img_res,cv2.COLOR_RGB2BGR)
+				cv2.imwrite(os.path.join(kp_params,w_name),img_res)
+
 	def color_palette(self):
 		""" Creates a color palette dictionnary
 		Drawing Purposes
@@ -150,9 +236,10 @@ class PredictProcessor():
 		""" Initialize the Hourglass Model
 		"""
 		t = time()
+		#with tf.device('/gpu:1'):
 		with self.graph.as_default():
 			self.HG.generate_model()
-		print('Graph Generated in ', int(time() - t), ' sec.')
+			print('Graph Generated in ', int(time() - t), ' sec.')
 	
 	def load_model(self, load = None):
 		""" Load pretrained weights (See README)
@@ -300,7 +387,7 @@ class PredictProcessor():
 				return j * self.params['img_size'] / self.params['hm_size']
 			else:
 				print("Error: 'coord' argument different of ['hm','img']")
-				
+			
 	def joints_pred_numpy(self, img, coord = 'hm', thresh = 0.2, sess = None):
 		""" Create Tensor for joint position prediction
 		NON TRAINABLE
@@ -316,6 +403,24 @@ class PredictProcessor():
 		for i in range(self.params['num_joints']):
 			index = np.unravel_index(hm[0,:,:,i].argmax(), (self.params['hm_size'],self.params['hm_size']))
 			if hm[0,index[0], index[1],i] > thresh:
+				if coord == 'hm':
+					joints[i] = np.array(index)
+				elif coord == 'img':
+					joints[i] = np.array(index) * self.params['img_size'] / self.params['hm_size']
+		return joints
+	
+	def joints_pred_boxS(self, img,boxL,boxS,WorH,coord = 'hm', thresh = 0.2, sess = None):
+		if sess is None:
+			hm = self.HG.Session.run(self.HG.pred_sigmoid , feed_dict = {self.HG.img: img})
+		else:
+			hm = sess.run(self.HG.pred_sigmoid , feed_dict = {self.HG.img: img})
+		joints = -1*np.ones(shape = (self.params['num_joints'], 2))
+		for i in range(self.params['num_joints']):
+			index = np.unravel_index(hm[0,:,:,i].argmax(), (self.params['hm_size'],self.params['hm_size']))
+			max_score=hm[0,index[0],index[1],i]
+			minL_id=1 if WorH == 'w' else 0
+			resize_boxS=self.params['hm_size']/boxL*boxS
+			if max_score > thresh and self.params['hm_size']//2-resize_boxS//2<index[minL_id]<self.params['hm_size']//2+resize_boxS//2:
 				if coord == 'hm':
 					joints[i] = np.array(index)
 				elif coord == 'img':
@@ -491,7 +596,7 @@ class PredictProcessor():
 		joints = np.concatenate([x,y], axis = 1).astype(np.int64)
 		return joints
 	
-	def reconstructACPVideo(self, load = 'F:/Cours/DHPE/DHPE/hourglass_tiny/withyolo/p4frames.mat',n = 5):
+	def reconstructACPVideo(self, load = 'p4frames.mat',n = 5):
 		""" Single Person Detection with Principle Componenent Analysis (PCA)
 		This method reconstructs joints given an error matrix (computed on MATLAB and available on GitHub)
 		and try to use temporal information from previous frames to improve detection and reduce False Positive
@@ -665,12 +770,199 @@ class PredictProcessor():
 		if debug:
 			return framerate
 	
+	def noano_input(self,datagen,thresh = 0.04, plt_j = True, plt_l = True, plt_hm = False, debug = True):
+		names=[]
+		sub='abcdefghijklmnopq'
+		k=0
+		fid=open(self.txt_src,'r')
+		for img_name in fid.readlines():
+			sample=img_name.strip().split(' ')
+			name=sample[0]
+			if name not in names:
+				names.append(name)
+				k=0
+				w_name=name
+			else:
+				w_name=name[:-4]+sub[k]+'.jpg'
+				k+=1
+			box=list(map(int,sample[1:]))
+			img=cv2.imread(os.path.join(self.img_dir,name))
+			#print([self.img_dir,img_name)
+			img=cv2.cvtColor(img,cv2.COLOR_BGR2RGB)
+			padd,cbox=datagen._crop_data(img.shape[0],img.shape[1],box,joints=None,boxp=0.2)
+			img=datagen._crop_img(img,padd,cbox)
+			#img=img.astype(np.uint8)    
+			img_hg = cv2.resize(img, (256,256))
+			#cv2.imshow('1',img_hg)
+			#cv2.waitKey(10000)
+			img_res = cv2.resize(img, (800,800))
+			#img_copy = np.copy(img_res)
+			img_hg = cv2.cvtColor(img_hg, cv2.COLOR_BGR2RGB)
+			hg = self.HG.Session.run(self.HG.pred_sigmoid, feed_dict = {self.HG.img: np.expand_dims(img_hg/255, axis = 0)})
+			j = np.ones(shape = (self.params['num_joints'],2)) * -1
+			if plt_hm:
+				hm = np.sum(hg[0], axis = 2)
+				hm = np.repeat(np.expand_dims(hm, axis = 2), 3, axis = 2)
+				hm = cv2.resize(hm, (800,800))
+				img_res = img_res / 255 + hm
+			for i in range(len(j)):
+				idx = np.unravel_index( hg[0,:,:,i].argmax(), (64,64))
+				if hg[0, idx[0], idx[1], i] > thresh:
+					j[i] = np.asarray(idx) * 800 / 64
+					if plt_j:
+						cv2.circle(img_res, center = tuple(j[i].astype(np.int))[::-1], radius= 5, color= self.color[i][::-1], thickness= -1)
+			if plt_l:
+				for i in range(len(self.links)):
+					l = self.links[i]['link']
+					good_link = True
+					for p in l:
+						if np.array_equal(j[p], [-1,-1]):
+							good_link = False
+					if good_link:
+						pos = self.givePixel(l, j)
+						cv2.line(img_res, tuple(pos[0])[::-1], tuple(pos[1])[::-1], self.links[i]['color'][::-1], thickness = 5)
+			#cv2.imshow('stream', img_res)
+			#if name in names:
+			#	name=name.join(sub[flag])
+			#	flag+=1
+			img_res = cv2.cvtColor(img_res,cv2.COLOR_RGB2BGR)
+			cv2.imwrite(os.path.join(self.wpath,w_name),img_res)
+
+	def full_input(self, datagen,thresh = 0, plt_j = True, plt_l = True, plt_hm = False, debug = True):
+		#fid=open(self.txt_src,'r')
+		
+		datagen.pck_ready(idlh=8,idrs=9)
+		self.ratio_pck = []
+		self.ratio_pck_full = []
+		self.pck_id = []
+		samples = len(datagen.pck_samples)
+		print(samples)
+			
+		for idx, sample in enumerate(datagen.pck_samples):
+			if sample != None :
+				joints = datagen.data_dict[sample]['joints']
+				w=datagen.data_dict[sample]['weights']
+				img = datagen.open_img(sample)
+				gtJoints=np.zeros((16,2))
+				#print(type(joints))
+				gtJoints[:,0]=np.asarray(joints[:,0])/img.shape[0]*256
+				gtJoints[:,1]=np.asarray(joints[:,1])/img.shape[1]*256
+				#print(gtJoints)	
+				img_hg = cv2.resize(img, (256,256))
+				img_res = cv2.resize(img, (800,800))
+				#img_copy = np.copy(img_res)
+				#img_hg = cv2.cvtColor(img_hg, cv2.COLOR_BGR2RGB)
+				hg = self.HG.Session.run(self.HG.pred_sigmoid, feed_dict = {self.HG.img: np.expand_dims(img_hg/255, axis = 0)})
+				prJoints = self.joints_pred_numpy(np.expand_dims(img_hg/255, axis = 0), coord = 'img', thresh = 0)
+				#prJoints=prJoints[::-1]
+				#joints.append(prJoints)
+				self.pck(w, gtJoints, prJoints, gtJFull=gtJoints,boxL= 0, idlh=8, idrs = 9)
+				j = np.ones(shape = (self.params['num_joints'],2)) * -1
+				if plt_hm:
+					hm = np.sum(hg[0], axis = 2)
+					hm = np.repeat(np.expand_dims(hm, axis = 2), 3, axis = 2)
+					hm = cv2.resize(hm, (800,800))
+					img_res = img_res / 255 + hm
+				for i in range(len(j)):
+					idx = np.unravel_index( hg[0,:,:,i].argmax(), (64,64))
+					if hg[0, idx[0], idx[1], i] > thresh:
+						j[i] = np.asarray(idx) * 800 / 64
+						if plt_j:
+							cv2.circle(img_res, center = tuple(j[i].astype(np.int))[::-1], radius= 5, color= self.color[i][::-1], thickness= -1)
+				if plt_l:
+					for i in range(len(self.links)):
+						l = self.links[i]['link']
+						good_link = True
+						for p in l:
+							if np.array_equal(j[p], [-1,-1]):
+								good_link = False
+						if good_link:
+							pos = self.givePixel(l, j)
+							cv2.line(img_res, tuple(pos[0])[::-1], tuple(pos[1])[::-1], self.links[i]['color'][::-1], thickness = 5)
+			#fid.close()
+			img_res=cv2.cvtColor(img_res,cv2.COLOR_RGB2BGR)
+			img_name=sample[:-1]
+			#cv2.imwrite(os.path.join(self.wpath,img_name),img_res)
+			#cv2.imshow(sample,img_res)
+			#cv2.waitKey(10000)
+
+		dist=0
+		for x in self.ratio_pck_full :
+			if x<=1 : dist+=1
+		print('pckh@0.5 = ',dist/datagen.total_joints)
+
+	def crop_input(self, datagen,bS=False,boxp=0.2,thresh = 0, plt_j = True, plt_l = True, plt_hm = False,testSet=None):
+		datagen.pck_ready(idlh = 8, idrs = 9,testSet=testSet)
+		samples = len(datagen.pck_samples)
+		self.ratio_pck = []
+		self.ratio_pck_full = []
+		self.pck_id = []
+		st1=time()
+		for idx, sample in enumerate(datagen.pck_samples):
+			res = datagen.getSample(boxp,sample)		
+			if res != False:
+				img, gtJoints, w, gtJFull, boxL,boxS,WorH = res
+				img_hg=img
+				#img_hg = cv2.resize(img, (256,256))
+				img_res = cv2.resize(img, (800,800))
+				#img_copy = np.copy(img_res)
+				img_hg = cv2.cvtColor(img_hg, cv2.COLOR_BGR2RGB)
+				hg = self.HG.Session.run(self.HG.pred_sigmoid, feed_dict = {self.HG.img: np.expand_dims(img_hg/255, axis = 0)})
+				if bS:
+					prJoints = self.joints_pred_boxS(np.expand_dims(img/255, axis = 0),boxL,boxS,WorH, coord = 'img', thresh = 0)
+				else:
+                                        prJoints = self.joints_pred_numpy(np.expand_dims(img/255, axis = 0), coord = 'img', thresh = 0)
+				#self.pck(w, gtJoints, prJoints, gtJFull, boxL, idlh=8, idrs = 9)	
+				j = np.ones(shape = (16,2)) * -1
+				if plt_hm:
+					hm = np.sum(hg[0], axis = 2)
+					hm = np.repeat(np.expand_dims(hm, axis = 2), 3, axis = 2)
+					hm = cv2.resize(hm, (800,800))
+					img_res = img_res / 255 + hm
+				for i in range(len(j)):
+					idx = np.unravel_index( hg[0,:,:,i].argmax(), (64,64))
+					center=32
+					min_l=64/boxL*boxS
+					wh_id=1 if WorH=='w' else 0
+					if hg[0, idx[0], idx[1], i] > thresh and center-min_l//2<idx[wh_id]<center+min_l//2:
+						j[i] = np.asarray(idx) * 800 / 64
+						if plt_j:
+							cv2.circle(img_res, center = tuple(j[i].astype(np.int))[::-1], radius= 5, color= self.color[i][::-1], thickness= -1)
+				if plt_l:
+					for i in range(len(self.links)):
+						l = self.links[i]['link']
+						good_link = True
+						for p in l:
+							if np.array_equal(j[p], [-1,-1]):
+								good_link = False
+						if good_link:
+							pos = self.givePixel(l, j)
+							cv2.line(img_res, tuple(pos[0])[::-1], tuple(pos[1])[::-1], self.links[i]['color'][::-1], thickness = 5)
+				#print(os.path.join(self.wpath,sample))
+				#cv2.imshow('1',img_res)
+				#cv2.waitKey(10000)
+				img_name=sample[:-1]
+				img_res1=cv2.cvtColor(img_res, cv2.COLOR_RGB2BGR)	
+				#np.save('pck_crop',self.ratio_pck_full)
+				#cv2.imshow(img_name,img_res1)	
+				#print(img_name)
+				#print(prJoints)	
+				#cv2.waitKey(20000)
+				#cv2.destroyAllWindows()
+				cv2.imwrite(os.path.join(self.wpath,img_name),img_res1)
+		print('write finished in ',time()-st1,'secs')
+		#st2=time()
+		#dist=0
+		#for x in self.ratio_pck_full:
+		#	if x<=1 : dist+=1
+		#print('pckh@0.5 = ',dist/datagen.total_joints,' finished in ',time()-st2,'secs')
+
 	def mpe(self, j_thresh = 0.5, nms_thresh = 0.5, plt_l = True, plt_j = True, plt_b = True, img_size = 800,  skeleton = False):
 		""" Multiple Person Estimation (WebCam usage)
 		Args:
-			j_thresh		: Joint Threshold
+			j_thresh		 Joint Threshold
 			nms_thresh	: Non Maxima Suppression Threshold
-			plt_l			: (bool) Plot Limbs
+			lppt_l			: (bool) Plot Limbs
 			plt_j			: (bool) Plot Joints
 			plt_b			: (bool) Plot Bounding Boxes
 			img_size		: Resolution of Output Image
@@ -975,7 +1267,7 @@ class PredictProcessor():
 	
 	 #-------------------------Benchmark Methods (PCK)-------------------------
 	
-	def pcki(self, joint_id, gtJ, prJ, idlh = 3, idrs = 12):
+	def pcki(self, joint_id, gtJ, prJ, idlh = 8, idrs = 9, thr=0.25):
 		""" Compute PCK accuracy on a given joint
 		Args:
 			joint_id	: Index of the joint considered
@@ -986,9 +1278,9 @@ class PredictProcessor():
 		Returns:
 			(float) NORMALIZED L2 ERROR
 		"""
-		return np.linalg.norm(gtJ[joint_id]-prJ[joint_id][::-1]) / np.linalg.norm(gtJ[idlh]-gtJ[idrs])
+		return np.linalg.norm(gtJ[joint_id]-prJ[joint_id][::-1]) / (thr*np.linalg.norm(gtJ[idlh]-gtJ[idrs])+0.00001)
 		
-	def pck(self, weight, gtJ, prJ, gtJFull, boxL, idlh = 3, idrs = 12):
+	def pck(self, weight, gtJ, prJ, gtJFull, boxL, idlh = 8, idrs = 9):
 		""" Compute PCK accuracy for a sample
 		Args:
 			weight		: Index of the joint considered
@@ -999,39 +1291,82 @@ class PredictProcessor():
 			idlh		: Index of Normalizer (Left Hip on PCK, neck on PCKh)
 			idrs		: Index of Normalizer (Right Shoulder on PCK, top head on PCKh)
 		"""
+		
 		for i in range(len(weight)):
 			if weight[i] == 1:
+				if prJ[i][0]==-1:
+					self.FN+=1
+					#print(self.pcki(i, gtJFull, np.asarray(prJ / 255 * boxL),idlh=8,idrs=9,thr=0.5))
 				self.ratio_pck.append(self.pcki(i, gtJ, prJ, idlh=idlh, idrs = idrs))
-				self.ratio_pck_full.append(self.pcki(i, gtJFull, np.asarray(prJ / 255 * boxL)))
+				self.ratio_pck_full.append(self.pcki(i, gtJFull, np.asarray(prJ / 255 * boxL),idlh=idlh,idrs=idrs))
 				self.pck_id.append(i)
-	
-	def compute_pck(self, datagen, idlh = 3, idrs = 12, testSet = None):
+			else:
+				if prJ[i][0]!=-1:
+					self.FP+=1
+				
+	def compute_pck(self, datagen,bS=False,boxp=0.15,thresh=0,idlh = 8, idrs = 9, testSet = None):
 		""" Compute PCK on dataset
 		Args:
 			datagen	: (DataGenerator)
 			idlh		: Index of Normalizer (Left Hip on PCK, neck on PCKh)
 			idrs		: Index of Normalizer (Right Shoulder on PCK, top head on PCKh)
 		"""
+		self.FP=0
+		self.FN=0
 		datagen.pck_ready(idlh = idlh, idrs = idrs, testSet = testSet)
 		self.ratio_pck = []
 		self.ratio_pck_full = []
 		self.pck_id = []
 		samples = len(datagen.pck_samples)
 		startT = time()
+		#prJ_ori=[]
+		#jid=[]
 		for idx, sample in enumerate(datagen.pck_samples):
 			percent = ((idx+1)/samples) * 100
 			num = np.int(20*percent/100)
 			tToEpoch = int((time() - startT) * (100 - percent)/(percent))
 			sys.stdout.write('\r PCK : {0}>'.format("="*num) + "{0}>".format(" "*(20-num)) + '||' + str(percent)[:4] + '%' + ' -timeToEnd: ' + str(tToEpoch) + ' sec.')
 			sys.stdout.flush()
-			res = datagen.getSample(sample)
+			res = datagen.getSample(boxp,sample)
 			if res != False:
-				img, gtJoints, w, gtJFull, boxL = res
-				prJoints = self.joints_pred_numpy(np.expand_dims(img/255, axis = 0), coord = 'img', thresh = 0)
+				img, gtJoints, w, gtJFull, boxL,boxS,WorH = res
+				if bS:
+					prJoints = self.joints_pred_boxS(np.expand_dims(img/255, axis =      0),boxL,boxS,WorH, coord = 'img', thresh = thresh)
+				else:
+					prJoints = self.joints_pred_numpy(np.expand_dims(img/255, axis = 0), coord = 'img', thresh = thresh)
+
+				#print(gtJoints)
+				#print(gtJFull)
+				#print(prJoints)
+				#prJ_full=prJoints/255*boxL
+				#joints = datagen.data_dict[sample]['joints']
+				#box = datagen.data_dict[sample]['box']
+				#w1 = datagen.data_dict[sample]['weights']
+				#img1 = datagen.open_img(sample)
+				#padd, cbox = datagen._crop_data(img1.shape[0], img1.shape[1], box, joints, boxp = 0.2)
+				#max_l=max(cbox[2],cbox[3])
+				#prJ_full=prJ_full[::-1]
+				#prJ_full=gtJFull
+				#prJ_full = prJ_full - [padd[1][0], padd[0][0]]
+				#prJ_full = prJ_full + [cbox[0] - max_l //2,cbox[1] - max_l //2]
+				#print(prJ_full)
+				#print(joints)	
+				#prJ_ori.append(prJ_full)
+				#jid.append(w)
+				#print(jid)
 				self.pck(w, gtJoints, prJoints, gtJFull, boxL, idlh=idlh, idrs = idrs)
+		print('pred Done in ', int(time() - startT), 'sec.')
+		dist=0
+		for x in self.ratio_pck_full :
+			if x<=1 : dist+=1
+		pckh=dist/datagen.total_joints
+		fpr=self.FP/(samples*16-datagen.total_joints)
+		tpr=(datagen.total_joints-self.FN)/datagen.total_joints
+		print('pckh@0.5 = {:.4f} \n thresh = {:.2f} \n boxp = {:.3f} \n fpr = {:.4f} \n tpr = {:.4f}'.format(pckh,thresh,boxp,fpr,tpr))	
 		print('Done in ', int(time() - startT), 'sec.')
+		return [pckh,fpr,tpr]
 			
-	#-------------------------Object Detector (YOLO)-------------------------
+	#------------------------Object Detector (YOLO)-------------------------
 	
 	# YOLO MODEL
 	# Source : https://github.com/hizhangp/yolo_tensorflow
@@ -1276,16 +1611,130 @@ class PredictProcessor():
 				cap.release()
 		cv2.destroyAllWindows()
 		cap.release()
+
+	def many_var(self,start,end,step,dataset,boxp=0.2,thresh=0,Var='thresh'):
+		import matplotlib.pyplot as plt
 		
+		pft=[]
+		x=np.arange(start,end,step)
+		if Var=='thresh':
+			for thr in x:
+				pft.append(predict.compute_pck(dataset,boxp=boxp,thresh=thr))
+			#print('Done in ', int(time() - startT), 'sec.')
+			pft=np.array(pft)
+			plt.figure('1')
+			plt.plot(x,pft[:,0])
+			plt.xlabel('thresh')
+			plt.ylabel('pckh')
+			plt.show()
+
+		if Var=='boxp':
+			for boxp in x:
+				pft.append(predict.compute_pck(dataset,boxp=boxp,thresh=thresh))	
+			pft=np.array(pft)
+			plt.figure('1')
+			plt.plot(x,pft[:,0])
+			plt.xlabel('boxp')
+			plt.ylabel('pckh')
+			plt.show()
+			
+		if Var=='iou':
+			pft.append(predict.compute_pck(dataset,boxp=0.1))
+			pft=np.array(pft)
+			plt.figure('1')
+			plt.plot(x,pft[:,0])
+			plt.xlabel('iou')
+			plt.ylabel('pckh')
+			plt.show()
+
+		#plt.figure('2')
+		#plt.plot(pft[:,1],pft[:,2])
+		#plt.xlabel('fpr')
+		#plt.ylabel('tpr')
+		#plt.show()	
+	
 if __name__ == '__main__':
 	t = time()
-	params = process_config('configTiny.cfg')
+	conf1='./model/ssd_hg_mcam26k/config_mcam_200.cfg'
+	model1='./model/ssd_hg_mcam26k/ssd_hg_mcam26k_200'
+	model2='./model/tiny_only/hg_tiny_only_100'
+	conf2='./model/tiny_only/config.cfg'
+	model3='./model/dl_tiny/hg_refined_tiny_200'
+	conf3='./model/dl_tiny/config.cfg'
+	conf4='./model/ssd_floss_boxp0.2/config_mcam_200.cfg'
+	model4='./model_newlr/pre_boxp0.05/pre_boxp0.05_100'
+	model5='./model_newlr/pre_ssdbox_floss_boxp/pre_ssdbox_boxp0.1_100'
+	conf5='./model_newlr/pre_ssdbox_floss_boxp/config.cfg'
+	model6='./model_newlr/new_floss_gt/new_floss_gt_100_100'
+	conf6='./model_newlr/pred_ssdbox/config.cfg'
+	model7='./model_newlr/new_gt/new_gt_100'
+	model8='./model_newlr/new_minL_gt/new_minL_gt_100_100'
+	model9='./model_newlr/atm_mpii/atm_mpii_100'
+
+	model10='./model_webn/8stack/8stack_56_44'
+	conf10='./model_webn/8stack/config.cfg'
+	model11='./model_webn/held_tiny/held_tiny_200'
+	conf11='./model_webn/held_tiny/config.cfg'
+	model12='./model_webn/held_untiny/held_untiny_200'
+	conf12='./model_webn/held_untiny/config.cfg'
+
+	model=model12
+	params = process_config(conf12)##need change
 	predict = PredictProcessor(params)
 	predict.color_palette()
 	predict.LINKS_JOINTS()
 	predict.model_init()
-	predict.load_model(load = 'hg_refined_tiny_200')
-	predict.yolo_init()
-	predict.restore_yolo(load = 'YOLO_small.ckpt')
+	predict.load_model(load = model)##need change
 	predict._create_prediction_tensor()
-	print('Done: ', time() - t, ' sec.')
+
+	thresh=0
+	boxp=0.2
+	minL=True
+	#testSet='./half20_ae.txt'
+	#img_dir='./half20'
+	#testSet='full_test50_sample_ae.txt'
+	testSet='val3k.txt'
+	img_dir='/home/yangjing/data/MPII_pose/mpii_human_pose_v1/images/'
+	#img_dir='./full_test50'
+	#predict.wpath='./fuji_kp/full50_atm'
+
+	muti_iou=False
+	if muti_iou:
+		print('model is {}'.format(model))#need change
+		testSet_dir='./utils/syn/'
+		testSets=os.listdir(testSet_dir)
+		testSets.sort()
+		pft=[]
+		for tset in testSets:
+			testSet=os.path.join(testSet_dir,tset)
+			dataset = DataGenerator(joints_name=params['joint_list'],img_dir=img_dir,train_data_file=testSet)
+			dataset._create_train_table()
+			print('testSet is: {}\n length = {:d}\n '.format(tset,len(dataset.data_dict)))
+			pft.append(predict.compute_pck(dataset,boxp=boxp,thresh=thresh))
+			dataset.pck_samples
+		pft=np.array(pft)
+		
+
+		import matplotlib.pyplot as plt
+
+		x=np.arange(0,0.4,0.05)
+		plt.figure('pckh-IOU')
+		plt.xlabel('IOU')
+		plt.ylabel('pckh')	
+		plt.plot(x,pft[:,0])
+		plt.show()
+	else:	
+		dataset = DataGenerator(minL,boxp,joints_name=params['joint_list'],img_dir=img_dir,train_data_file=testSet)
+		dataset._create_train_table()
+		dataset._create_val_table()
+		print(len(dataset.data_dict))
+		print('Done: ', time() - t, ' sec.')
+		print(' model is: {}\n testSet is: {}'.format(model,testSet))#need change
+
+		#predict.dets_input(dataset,thresh=0.05)  ## for detection boxes
+		#predict.compute_pck(dataset,boxp=boxp,thresh=thresh,idlh=3,idrs=12)
+		#predict.many_var(0.175,0.2251,0.025,dataset=dataset,boxp=boxp,thresh=thresh,Var='boxp')
+		#predict.crop_input(dataset,thresh=thresh) ##for drawing results
+		#dataset.test()
+		#print('Done: ', time() - t, ' sec.')
+		predict.reconstructACPVideo()
