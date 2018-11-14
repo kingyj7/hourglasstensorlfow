@@ -81,7 +81,7 @@ class DataGenerator():
 		Store image/heatmap arrays (numpy file stored in a folder: need disk space but faster reading)
 		Generate image/heatmap arrays when needed (Generate arrays while training, increase training time - Need to compute arrays at every iteration) 
 	"""
-	def __init__(self, joints_name = None, img_dir=None, train_data_file = None, remove_joints = None):
+	def __init__(self,minL,boxp,joints_name = None, img_dir=None, train_data_file = None, remove_joints = None):
 		""" Initializer
 		Args:
 			joints_name			: List of joints condsidered
@@ -102,7 +102,9 @@ class DataGenerator():
 		self.img_dir = img_dir
 		self.train_data_file = train_data_file
 		self.images = os.listdir(img_dir)
-	
+		self.boxp=boxp
+		self.minL=minL
+		self.val_data_file='val3k.txt'
 	# --------------------Generator Initialization Methods ---------------------
 	
 	
@@ -124,11 +126,14 @@ class DataGenerator():
 		self.data_dict = {}
 		input_file = open(self.train_data_file, 'r')
 		print('READING TRAIN DATA')
+		#print(len(input_file.readlines()))
 		for line in input_file:
 			line = line.strip()
 			line = line.split(' ')
 			name = line[0]
+                        #print(name)
 			box = list(map(int,line[1:5]))
+			#print(box)
 			joints = list(map(int,line[5:]))
 			if self.toReduce:
 				joints = self._reduce_joints(joints)
@@ -144,6 +149,37 @@ class DataGenerator():
 				self.train_table.append(name)
 		input_file.close()
 	
+	def _create_val_table(self):
+		""" Create Table of samples from TEXT file
+		"""
+		self.val_table = []
+		#self.no_intel = []
+		#self.data_dict = {}
+		input_file = open(self.val_data_file, 'r')
+		print('READING VAL DATA')
+		#print(len(input_file.readlines()))
+		for line in input_file:
+			line = line.strip()
+			line = line.split(' ')
+			name = line[0]
+                        #print(name)
+			box = list(map(int,line[1:5]))
+			#print(box)
+			joints = list(map(int,line[5:]))
+			#if self.toReduce:
+			#	joints = self._reduce_joints(joints)
+			if joints == [-1] * len(joints):
+				self.no_intel.append(name)
+			else:
+				joints = np.reshape(joints, (-1,2))
+				w = [1] * joints.shape[0]
+				for i in range(joints.shape[0]):
+					if np.array_equal(joints[i], [-1,-1]):
+						w[i] = 0
+				self.data_dict[name] = {'box' : box, 'joints' : joints, 'weights' : w}
+				self.val_table.append(name)
+		input_file.close()
+
 	def _randomize(self):
 		""" Randomize the set
 		"""
@@ -182,21 +218,30 @@ class DataGenerator():
 		Args:
 			validation_rate		: Percentage of validation data (in ]0,1[, don't waste time use 0.1)
 		"""
-		sample = len(self.train_table)
-		valid_sample = int(sample * validation_rate)
-		self.train_set = self.train_table[:sample - valid_sample]
-		self.valid_set = []
-		preset = self.train_table[sample - valid_sample:]
+		#sample = len(self.train_table)
+		#valid_sample = int(sample * validation_rate)
+		#self.train_set = self.train_table[:sample - valid_sample]
+		#self.valid_set = []
+		#preset = self.train_table[sample - valid_sample:]
+	
+		self.valid_set=[]	
+		self.train_set=self.train_table
+		preset=self.val_table
+		#print(self.data_dict)
+		#print(preset)
+
 		print('START SET CREATION')
 		for elem in preset:
 			if self._complete_sample(elem):
 				self.valid_set.append(elem)
-			else:
-				self.train_set.append(elem)
+			#else:
+			#	self.train_set.append(elem)
 		print('SET CREATED')
-		np.save('Dataset-Validation-Set', self.valid_set)
-		np.save('Dataset-Training-Set', self.train_set)
+		#np.save('Dataset-Validation-Set1', self.valid_set)
+		#np.save('Dataset-Training-Set1', self.train_set)
 		print('--Training set :', len(self.train_set), ' samples.')
+		print(self.data_dict[self.train_set[0]])
+		print(self.data_dict[self.valid_set[0]])
 		print('--Validation set :', len(self.valid_set), ' samples.')
 	
 	def generateSet(self, rand = False):
@@ -285,7 +330,7 @@ class DataGenerator():
 		crop_box[1] += padding[0][0]
 		return padding, crop_box
 	
-	def _crop_img(self, img, padding, crop_box):
+	def _crop_img(self, img, padding, crop_box,minL):
 		""" Given a bounding box and padding values return cropped image
 		Args:
 			img			: Source Image
@@ -295,6 +340,18 @@ class DataGenerator():
 		img = np.pad(img, padding, mode = 'constant')
 		max_lenght = max(crop_box[2], crop_box[3])
 		img = img[crop_box[1] - max_lenght //2:crop_box[1] + max_lenght //2, crop_box[0] - max_lenght // 2:crop_box[0] + max_lenght //2]
+		
+		if minL:	
+			max_name='width' if max_lenght == crop_box[2] else 'height'
+			min_lenght=min(crop_box[2], crop_box[3])
+			extra=(max_lenght-min_lenght)// 2
+			#print(extra)
+			if max_name=='height':
+				img[:, :extra] = 0
+				img[:, -extra:] = 0
+			else:
+				img[:extra,:] = 0
+				img[-extra:,:] = 0
 		return img
 		
 	def _crop(self, img, hm, padding, crop_box):
@@ -366,13 +423,13 @@ class DataGenerator():
 						weight = self.data_dict[name]['weights']
 						if debug:
 							print(box)
-						padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = 0.2)
+						padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = self.boxp)
 						if debug:
 							print(cbox)
 							print('maxl :', max(cbox[2], cbox[3]))
 						new_j = self._relative_joints(cbox,padd, joints, to_size=64)
 						hm = self._generate_hm(64, 64, new_j, 64, weight)
-						img = self._crop_img(img, padd, cbox)
+						img = self._crop_img(img, padd, cbox,self.minL)
 						img = img.astype(np.uint8)
 						# On 16 image per batch
 						# Avg Time -OpenCV : 1.0 s -skimage: 1.25 s -scipy.misc.imresize: 1.05s
@@ -419,10 +476,10 @@ class DataGenerator():
 					weight = np.asarray(self.data_dict[name]['weights'])
 					train_weights[i] = weight 
 					img = self.open_img(name)
-					padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = 0.2)
+					padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = self.boxp)
 					new_j = self._relative_joints(cbox,padd, joints, to_size=64)
 					hm = self._generate_hm(64, 64, new_j, 64, weight)
-					img = self._crop_img(img, padd, cbox)
+					img = self._crop_img(img, padd, cbox,self.minL)
 					img = img.astype(np.uint8)
 					img = scm.imresize(img, (256,256))
 					img, hm = self._augment(img, hm)
@@ -490,15 +547,21 @@ class DataGenerator():
 		Args:
 			toWait : In sec, time between pictures
 		"""
-		self._create_train_table()
 		self._create_sets()
+		boxp=0.2
+		#print(len(self.train_set))
 		for i in range(len(self.train_set)):
 			img = self.open_img(self.train_set[i])
 			w = self.data_dict[self.train_set[i]]['weights']
-			padd, box = self._crop_data(img.shape[0], img.shape[1], self.data_dict[self.train_set[i]]['box'], self.data_dict[self.train_set[i]]['joints'], boxp= 0.0)
+			#print(self.data_dict[self.train_set[i]]['box'])
+			padd, box = self._crop_data(img.shape[0], img.shape[1], self.data_dict[self.train_set[i]]['box'], self.data_dict[self.train_set[i]]['joints'], boxp= boxp)
 			new_j = self._relative_joints(box,padd, self.data_dict[self.train_set[i]]['joints'], to_size=256)
 			rhm = self._generate_hm(256, 256, new_j,256, w)
-			rimg = self._crop_img(img, padd, box)
+			rimg = self._crop_img(img, padd, box,self.minL)
+			bgrimg = cv2.cvtColor(rimg, cv2.COLOR_RGB2BGR)
+			print((bgrimg.shape[0],bgrimg.shape[1]))
+			cv2.imshow('1',bgrimg)
+			time.sleep(toWait)
 			# See Error in self._generator
 			#rimg = cv2.resize(rimg, (256,256))
 			rimg = scm.imresize(rimg, (256,256))
@@ -538,7 +601,7 @@ class DataGenerator():
 					self.total_joints += dict(zip(wIntel[0], wIntel[1]))[1]
 		print('PCK PREPROCESS DONE: \n --Samples:', len(self.pck_samples), '\n --Num.Joints', self.total_joints)
 	
-	def getSample(self, sample = None):
+	def getSample(self,boxp=0.2, sample = None):
 		""" Returns information of a sample
 		Args:
 			sample : (str) Name of the sample
@@ -550,25 +613,27 @@ class DataGenerator():
 			max_l: Maximum Size of Input Image
 		"""
 		if sample != None:
-			try:
+			try:	
+				#print(sample)
 				joints = self.data_dict[sample]['joints']
 				box = self.data_dict[sample]['box']
-				w = self.data_dict[sample]['weights']
+				w = self.data_dict[sample]['weights']	
 				img = self.open_img(sample)
-				padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = 0.2)
+				padd, cbox = self._crop_data(img.shape[0], img.shape[1], box, joints, boxp = boxp)
 				new_j = self._relative_joints(cbox,padd, joints, to_size=256)
 				joint_full = np.copy(joints)
 				max_l = max(cbox[2], cbox[3])
+				min_l =cbox[2] if max_l==cbox[2] else cbox[3]
+				woh='w'if max_l==cbox[2] else 'h'
 				joint_full = joint_full + [padd[1][0], padd[0][0]]
 				joint_full = joint_full - [cbox[0] - max_l //2,cbox[1] - max_l //2]
-				img = self._crop_img(img, padd, cbox)
+				img = self._crop_img(img, padd, cbox,self.minL)
 				img = img.astype(np.uint8)
 				img = scm.imresize(img, (256,256))
-				return img, new_j, w, joint_full, max_l
+				return img, new_j, w, joint_full, max_l,min_l,woh
 			except:
+				print('getSample False')
 				return False
 		else:
 			print('Specify a sample name')
 				
-		
-		
